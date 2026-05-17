@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       run_id:
-        description: 'Codecs Actions run_id (leave blank to pull from raw URLs)'
+        description: 'Codecs Actions run_id (leave blank to use latest)'
         required: false
 
 env:
@@ -36,35 +36,73 @@ jobs:
         run: npm install
 
       - name: Download openjpeg-wasm-dist artifact from codecs
-        uses: dawidd6/action-download-artifact@v6
-        with:
-          github_token: ${{ secrets.CROSS_REPO_PAT }}
-          repo: ahmedezzat85/codecs
-          workflow: build-openjpeg.yml
-          name: openjpeg-wasm-dist
-          path: /tmp/openjpeg-dist
-          branch: main
-          if_no_artifact_found: warn
+        run: |
+          mkdir -p /tmp/openjpeg-dist
+
+          # Get latest successful run ID for build-openjpeg.yml on ahmedezzat85/codecs
+          RUN_ID=$(curl -sf \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/ahmedezzat85/codecs/actions/workflows/build-openjpeg.yml/runs?status=success&per_page=1&branch=main" \
+            | jq -r '.workflow_runs[0].id')
+
+          echo "Latest successful run ID: $RUN_ID"
+
+          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+            echo "No successful run found — skipping artifact download, will fall back to raw URLs"
+            exit 0
+          fi
+
+          # Get artifact download URL
+          ARTIFACT_URL=$(curl -sf \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/ahmedezzat85/codecs/actions/runs/$RUN_ID/artifacts" \
+            | jq -r '.artifacts[] | select(.name=="openjpeg-wasm-dist") | .archive_download_url')
+
+          echo "Artifact URL: $ARTIFACT_URL"
+
+          if [ -z "$ARTIFACT_URL" ] || [ "$ARTIFACT_URL" = "null" ]; then
+            echo "Artifact not found — will fall back to raw URLs"
+            exit 0
+          fi
+
+          # Download and unzip artifact
+          curl -sL \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "$ARTIFACT_URL" -o /tmp/openjpeg-dist.zip
+
+          unzip -o /tmp/openjpeg-dist.zip -d /tmp/openjpeg-dist
+          echo "--- Artifact contents ---"
+          ls -lh /tmp/openjpeg-dist/
 
       - name: Copy WASM artifacts
         run: |
           DIST=/tmp/openjpeg-dist
+
           if [ ! -d "$DIST" ] || [ -z "$(ls -A $DIST 2>/dev/null)" ]; then
-            echo "No artifact - falling back to raw URLs"
+            echo "No artifact found — falling back to raw URLs from codecs/main"
             mkdir -p $DIST
             BASE=https://raw.githubusercontent.com/ahmedezzat85/codecs/main/packages/openjpeg/dist
             for f in openjpegwasm_decode.js openjpegwasm_decode.wasm openjpegjs_decode.js openjpegjs_decode.js.mem openjpegwasm.js openjpegwasm.wasm openjpegjs.js openjpegjs.js.mem; do
               curl -fsSL $BASE/$f -o $DIST/$f 2>/dev/null && echo "downloaded $f" || echo "SKIP $f"
             done
           fi
+
+          echo "--- Files to copy ---"
           ls -lh $DIST/
 
+          # Patch node_modules (used by build)
           NM_DEST=node_modules/@cornerstonejs/codec-openjpeg/dist
           mkdir -p $NM_DEST
           cp $DIST/*.js   $NM_DEST/ 2>/dev/null || true
           cp $DIST/*.wasm $NM_DEST/ 2>/dev/null || true
           cp $DIST/*.mem  $NM_DEST/ 2>/dev/null || true
+          echo "node_modules patched:"
+          ls -lh $NM_DEST/
 
+          # Vendor copy into src (persisted in repo)
           SRC_DEST=src/codecs/openjpeg
           mkdir -p $SRC_DEST
           cp $DIST/*.js   $SRC_DEST/ 2>/dev/null || true
@@ -79,7 +117,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dist-bundle
-          path: dist/
+          path: ${{ github.workspace }}/dist/
           if-no-files-found: warn
           retention-days: 7
 
@@ -98,4 +136,9 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
           git add src/codecs/openjpeg/
-          git diff --cached --quiet || git commit -m "ci: update vendored openjpeg WASM [skip ci]" && git push
+          if git diff --cached --quiet; then
+            echo "No changes to vendor — skipping commit."
+          else
+            git commit -m "ci: update vendored openjpeg WASM [skip ci]"
+            git push origin master
+          fi
