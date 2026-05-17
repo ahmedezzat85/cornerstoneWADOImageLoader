@@ -1,0 +1,101 @@
+name: Migrate OpenJPEG WASM
+
+on:
+  repository_dispatch:
+    types: [openjpeg-wasm-updated]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Codecs Actions run_id (leave blank to pull from raw URLs)'
+        required: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  migrate:
+    name: Migrate WASM + Verify Build
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '16'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Download openjpeg-wasm-dist artifact from codecs
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          github_token: ${{ secrets.CROSS_REPO_PAT }}
+          repo: ahmedezzat85/codecs
+          workflow: build-openjpeg.yml
+          name: openjpeg-wasm-dist
+          path: /tmp/openjpeg-dist
+          branch: main
+          if_no_artifact_found: warn
+
+      - name: Copy WASM artifacts
+        run: |
+          DIST=/tmp/openjpeg-dist
+          if [ ! -d "$DIST" ] || [ -z "$(ls -A $DIST 2>/dev/null)" ]; then
+            echo "No artifact - falling back to raw URLs"
+            mkdir -p $DIST
+            BASE=https://raw.githubusercontent.com/ahmedezzat85/codecs/main/packages/openjpeg/dist
+            for f in openjpegwasm_decode.js openjpegwasm_decode.wasm openjpegjs_decode.js openjpegjs_decode.js.mem openjpegwasm.js openjpegwasm.wasm openjpegjs.js openjpegjs.js.mem; do
+              curl -fsSL $BASE/$f -o $DIST/$f 2>/dev/null && echo "downloaded $f" || echo "SKIP $f"
+            done
+          fi
+          ls -lh $DIST/
+
+          NM_DEST=node_modules/@cornerstonejs/codec-openjpeg/dist
+          mkdir -p $NM_DEST
+          cp $DIST/*.js   $NM_DEST/ 2>/dev/null || true
+          cp $DIST/*.wasm $NM_DEST/ 2>/dev/null || true
+          cp $DIST/*.mem  $NM_DEST/ 2>/dev/null || true
+
+          SRC_DEST=src/codecs/openjpeg
+          mkdir -p $SRC_DEST
+          cp $DIST/*.js   $SRC_DEST/ 2>/dev/null || true
+          cp $DIST/*.wasm $SRC_DEST/ 2>/dev/null || true
+          cp $DIST/*.mem  $SRC_DEST/ 2>/dev/null || true
+
+      - name: Build
+        run: npm run build 2>&1 | tee /tmp/build.log
+
+      - name: Upload dist artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-bundle
+          path: dist/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: /tmp/build.log
+          retention-days: 7
+
+      - name: Commit vendored WASM
+        if: success()
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
+          git add src/codecs/openjpeg/
+          git diff --cached --quiet || git commit -m "ci: update vendored openjpeg WASM [skip ci]" && git push
