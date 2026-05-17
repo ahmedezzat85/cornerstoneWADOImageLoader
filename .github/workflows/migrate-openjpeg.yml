@@ -39,7 +39,6 @@ jobs:
         run: |
           mkdir -p /tmp/openjpeg-dist
 
-          # Get latest successful run ID for build-openjpeg.yml on ahmedezzat85/codecs
           RUN_ID=$(curl -sf \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
@@ -49,11 +48,10 @@ jobs:
           echo "Latest successful run ID: $RUN_ID"
 
           if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
-            echo "No successful run found — skipping artifact download, will fall back to raw URLs"
+            echo "No successful run found - will fall back to raw URLs"
             exit 0
           fi
 
-          # Get artifact download URL
           ARTIFACT_URL=$(curl -sf \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
@@ -63,11 +61,10 @@ jobs:
           echo "Artifact URL: $ARTIFACT_URL"
 
           if [ -z "$ARTIFACT_URL" ] || [ "$ARTIFACT_URL" = "null" ]; then
-            echo "Artifact not found — will fall back to raw URLs"
+            echo "Artifact not found - will fall back to raw URLs"
             exit 0
           fi
 
-          # Download and unzip artifact
           curl -sL \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
@@ -82,7 +79,7 @@ jobs:
           DIST=/tmp/openjpeg-dist
 
           if [ ! -d "$DIST" ] || [ -z "$(ls -A $DIST 2>/dev/null)" ]; then
-            echo "No artifact found — falling back to raw URLs from codecs/main"
+            echo "No artifact - falling back to raw URLs from codecs/main"
             mkdir -p $DIST
             BASE=https://raw.githubusercontent.com/ahmedezzat85/codecs/main/packages/openjpeg/dist
             for f in openjpegwasm_decode.js openjpegwasm_decode.wasm openjpegjs_decode.js openjpegjs_decode.js.mem openjpegwasm.js openjpegwasm.wasm openjpegjs.js openjpegjs.js.mem; do
@@ -93,7 +90,6 @@ jobs:
           echo "--- Files to copy ---"
           ls -lh $DIST/
 
-          # Patch node_modules (used by build)
           NM_DEST=node_modules/@cornerstonejs/codec-openjpeg/dist
           mkdir -p $NM_DEST
           cp $DIST/*.js   $NM_DEST/ 2>/dev/null || true
@@ -102,7 +98,6 @@ jobs:
           echo "node_modules patched:"
           ls -lh $NM_DEST/
 
-          # Vendor copy into src (persisted in repo)
           SRC_DEST=src/codecs/openjpeg
           mkdir -p $SRC_DEST
           cp $DIST/*.js   $SRC_DEST/ 2>/dev/null || true
@@ -110,14 +105,30 @@ jobs:
           cp $DIST/*.mem  $SRC_DEST/ 2>/dev/null || true
 
       - name: Build
-        run: npm run build 2>&1 | tee /tmp/build.log
+        id: build
+        run: |
+          touch /tmp/build.log
+          set -o pipefail
+          npm run build 2>&1 | tee /tmp/build.log
+          BUILD_EXIT=${PIPESTATUS[0]}
+          echo "build_exit=$BUILD_EXIT" >> $GITHUB_OUTPUT
+          exit $BUILD_EXIT
+
+      - name: Diagnostics
+        if: always()
+        run: |
+          echo "=== dist/ contents ==="
+          ls -lh dist/ 2>/dev/null || echo "dist/ does not exist or is empty"
+          echo ""
+          echo "=== Last 60 lines of build log ==="
+          tail -n 60 /tmp/build.log 2>/dev/null || echo "No build log found"
 
       - name: Upload dist artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: dist-bundle
-          path: ${{ github.workspace }}/dist/
+          path: dist/
           if-no-files-found: warn
           retention-days: 7
 
@@ -127,6 +138,7 @@ jobs:
         with:
           name: build-log
           path: /tmp/build.log
+          if-no-files-found: warn
           retention-days: 7
 
       - name: Commit vendored WASM
@@ -137,7 +149,7 @@ jobs:
           git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
           git add src/codecs/openjpeg/
           if git diff --cached --quiet; then
-            echo "No changes to vendor — skipping commit."
+            echo "No changes to vendor - skipping commit."
           else
             git commit -m "ci: update vendored openjpeg WASM [skip ci]"
             git push origin master
