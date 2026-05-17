@@ -34,12 +34,16 @@ jobs:
       - name: Build
         run: npm run build 2>&1 | tee /tmp/build.log
 
+      - name: List dist contents
+        if: always()
+        run: ls -lh ${{ github.workspace }}/dist/ || echo "dist/ not found"
+
       - name: Upload dist artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: dist-bundle
-          path: dist/
+          path: ${{ github.workspace }}/dist/
           if-no-files-found: warn
           retention-days: 7
 
