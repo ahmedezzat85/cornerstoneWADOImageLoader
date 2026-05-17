@@ -4,13 +4,10 @@ on:
   repository_dispatch:
     types: [openjpeg-wasm-updated]
   workflow_dispatch:
-    inputs:
-      run_id:
-        description: 'Codecs Actions run_id (leave blank to use latest)'
-        required: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CODECS_BASE: https://raw.githubusercontent.com/ahmedezzat85/codecs/main/packages/openjpeg/dist
 
 jobs:
   migrate:
@@ -35,67 +32,28 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Download openjpeg-wasm-dist artifact from codecs
+      - name: Pull WASM dist from codecs repo
         run: |
           mkdir -p /tmp/openjpeg-dist
-
-          RUN_ID=$(curl -sf \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/ahmedezzat85/codecs/actions/workflows/build-openjpeg.yml/runs?status=success&per_page=1&branch=main" \
-            | jq -r '.workflow_runs[0].id')
-
-          echo "Latest successful run ID: $RUN_ID"
-
-          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
-            echo "No successful run found - will fall back to raw URLs"
-            exit 0
-          fi
-
-          ARTIFACT_URL=$(curl -sf \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/ahmedezzat85/codecs/actions/runs/$RUN_ID/artifacts" \
-            | jq -r '.artifacts[] | select(.name=="openjpeg-wasm-dist") | .archive_download_url')
-
-          echo "Artifact URL: $ARTIFACT_URL"
-
-          if [ -z "$ARTIFACT_URL" ] || [ "$ARTIFACT_URL" = "null" ]; then
-            echo "Artifact not found - will fall back to raw URLs"
-            exit 0
-          fi
-
-          curl -sL \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            "$ARTIFACT_URL" -o /tmp/openjpeg-dist.zip
-
-          unzip -o /tmp/openjpeg-dist.zip -d /tmp/openjpeg-dist
-          echo "--- Artifact contents ---"
+          BASE=${{ env.CODECS_BASE }}
+          FILES="openjpegwasm_decode.js openjpegwasm_decode.wasm openjpegjs_decode.js openjpegjs_decode.js.mem openjpegwasm.js openjpegwasm.wasm openjpegjs.js openjpegjs.js.mem"
+          for f in $FILES; do
+            echo "Downloading $f ..."
+            curl -fsSL "$BASE/$f" -o "/tmp/openjpeg-dist/$f" && echo "  OK" || echo "  SKIP (not found)"
+          done
+          echo "--- Downloaded files ---"
           ls -lh /tmp/openjpeg-dist/
 
-      - name: Copy WASM artifacts
+      - name: Patch node_modules and src
         run: |
           DIST=/tmp/openjpeg-dist
-
-          if [ ! -d "$DIST" ] || [ -z "$(ls -A $DIST 2>/dev/null)" ]; then
-            echo "No artifact - falling back to raw URLs from codecs/main"
-            mkdir -p $DIST
-            BASE=https://raw.githubusercontent.com/ahmedezzat85/codecs/main/packages/openjpeg/dist
-            for f in openjpegwasm_decode.js openjpegwasm_decode.wasm openjpegjs_decode.js openjpegjs_decode.js.mem openjpegwasm.js openjpegwasm.wasm openjpegjs.js openjpegjs.js.mem; do
-              curl -fsSL $BASE/$f -o $DIST/$f 2>/dev/null && echo "downloaded $f" || echo "SKIP $f"
-            done
-          fi
-
-          echo "--- Files to copy ---"
-          ls -lh $DIST/
 
           NM_DEST=node_modules/@cornerstonejs/codec-openjpeg/dist
           mkdir -p $NM_DEST
           cp $DIST/*.js   $NM_DEST/ 2>/dev/null || true
           cp $DIST/*.wasm $NM_DEST/ 2>/dev/null || true
           cp $DIST/*.mem  $NM_DEST/ 2>/dev/null || true
-          echo "node_modules patched:"
+          echo "--- node_modules patched ---"
           ls -lh $NM_DEST/
 
           SRC_DEST=src/codecs/openjpeg
@@ -107,12 +65,10 @@ jobs:
       - name: Build
         id: build
         run: |
-          # Pre-create dist/ so artifact upload always has a target
           mkdir -p dist
           touch /tmp/build.log
           set -o pipefail
           npm run build 2>&1 | tee /tmp/build.log; BUILD_EXIT=${PIPESTATUS[0]}
-          # Copy log into dist so single artifact contains everything
           cp /tmp/build.log dist/build.log
           echo "build_exit=$BUILD_EXIT" >> $GITHUB_OUTPUT
           exit $BUILD_EXIT
@@ -121,18 +77,18 @@ jobs:
         if: always()
         run: |
           echo "=== dist/ contents ==="
-          ls -lh dist/ 2>/dev/null || echo "dist/ does not exist or is empty"
+          ls -lh dist/ 2>/dev/null || echo "dist/ is empty"
           echo ""
           echo "=== Last 80 lines of build log ==="
-          tail -n 80 /tmp/build.log 2>/dev/null || echo "No build log found"
+          tail -n 80 /tmp/build.log 2>/dev/null || echo "No log"
 
-      - name: Copy build log into dist on failure
+      - name: Copy log to dist on failure
         if: always()
         run: |
           mkdir -p dist
           cp /tmp/build.log dist/build.log 2>/dev/null || true
 
-      - name: Upload dist artifacts
+      - name: Upload dist-bundle
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -149,7 +105,7 @@ jobs:
           git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
           git add src/codecs/openjpeg/
           if git diff --cached --quiet; then
-            echo "No changes to vendor - skipping commit."
+            echo "No WASM changes - skipping commit."
           else
             git commit -m "ci: update vendored openjpeg WASM [skip ci]"
             git push origin master
