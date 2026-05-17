@@ -1,0 +1,38 @@
+name: Verify Build
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - '.github/workflows/migrate-openjpeg.yml'
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    name: webpack build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build
+        run: npm run build 2>&1 | tee /tmp/build-output.txt
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.sha }}
+          path: /tmp/build-output.txt
+          retention-days: 7
