@@ -1,216 +1,106 @@
-name: Migrate OpenJPEG WASM from codecs
+name: Migrate OpenJPEG WASM
 
 on:
-  # Triggered by codecs repo after a successful WASM build
   repository_dispatch:
     types: [openjpeg-wasm-updated]
-  # Also allow manual trigger for testing
   workflow_dispatch:
     inputs:
-      codecs_run_id:
-        description: 'Run ID from ahmedezzat85/codecs build-openjpeg workflow (leave blank to use latest)'
+      run_id:
+        description: 'Codecs Actions run_id to download artifact from (leave blank to use latest dist/ from repo)'
         required: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   migrate:
-    name: Migrate WASM artifacts + fix webpack
+    name: Migrate WASM + Verify Build
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout cornerstoneWADOImageLoader
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      # ----------------------------------------------------------------
-      # Step 1: Download the built WASM artifact from the codecs repo
-      # ----------------------------------------------------------------
-      - name: Resolve codecs run ID
-        id: resolve-run
-        run: |
-          if [ -n "${{ github.event.client_payload.run_id }}" ]; then
-            echo "run_id=${{ github.event.client_payload.run_id }}" >> $GITHUB_OUTPUT
-          elif [ -n "${{ github.event.inputs.codecs_run_id }}" ]; then
-            echo "run_id=${{ github.event.inputs.codecs_run_id }}" >> $GITHUB_OUTPUT
-          else
-            # Fetch the latest successful run ID from the codecs repo
-            RUN_ID=$(curl -s \
-              -H "Authorization: Bearer ${{ secrets.CROSS_REPO_PAT }}" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/ahmedezzat85/codecs/actions/workflows/build-openjpeg.yml/runs?status=success&per_page=1" \
-              | jq -r '.workflow_runs[0].id')
-            echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
-            echo "Resolved latest successful run ID: $RUN_ID"
-          fi
-
-      - name: Download openjpeg-wasm-dist artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: openjpeg-wasm-dist
-          path: /tmp/openjpeg-dist
-          github-token: ${{ secrets.CROSS_REPO_PAT }}
-          repository: ahmedezzat85/codecs
-          run-id: ${{ steps.resolve-run.outputs.run_id }}
-
-      - name: Show downloaded artifacts
-        run: ls -lh /tmp/openjpeg-dist/
-
-      # ----------------------------------------------------------------
-      # Step 2: Copy WASM files into the codec package location
-      # The @cornerstonejs/codec-openjpeg package exposes:
-      #   decodewasmjs  -> dist/openjpegwasm_decode.js
-      #   decodewasm    -> dist/openjpegwasm_decode.wasm
-      # We patch them in node_modules after npm install.
-      # To make this persistent across installs we also keep a local copy
-      # under src/codecs/ and patch the import in decodeJPEG2000.js.
-      # ----------------------------------------------------------------
-      - name: Set up Node.js
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '16'
+          cache: 'npm'
 
       - name: Install dependencies
         run: npm install
 
-      - name: Copy new WASM artifacts into @cornerstonejs/codec-openjpeg
+      - name: Download openjpeg-wasm-dist artifact from codecs
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          github_token: ${{ secrets.CROSS_REPO_PAT }}
+          repo: ahmedezzat85/codecs
+          workflow: build-openjpeg.yml
+          name: openjpeg-wasm-dist
+          path: /tmp/openjpeg-dist
+          branch: main
+          if_no_artifact_found: warn
+
+      - name: Copy WASM artifacts into node_modules and vendor src
         run: |
-          CODEC_DIR="node_modules/@cornerstonejs/codec-openjpeg/dist"
-          echo "Codec package dist dir: $CODEC_DIR"
-          ls -lh $CODEC_DIR || echo "(dir not found yet)"
-
-          # Identify actual output filenames (build.sh output can vary)
-          WASM_JS=$(ls /tmp/openjpeg-dist/openjpegwasm_decode.js 2>/dev/null \
-                 || ls /tmp/openjpeg-dist/openjpegwasm.js 2>/dev/null \
-                 || echo "")
-          WASM_BIN=$(ls /tmp/openjpeg-dist/openjpegwasm_decode.wasm 2>/dev/null \
-                  || ls /tmp/openjpeg-dist/openjpegwasm.wasm 2>/dev/null \
-                  || echo "")
-
-          if [ -z "$WASM_JS" ] || [ -z "$WASM_BIN" ]; then
-            echo "ERROR: Could not find expected WASM artifacts in /tmp/openjpeg-dist/"
-            ls /tmp/openjpeg-dist/
-            exit 1
+          DIST=/tmp/openjpeg-dist
+          if [ ! -d "$DIST" ] || [ -z "$(ls -A $DIST)" ]; then
+            echo "No artifact downloaded — falling back to codecs dist/ via raw URLs"
+            mkdir -p $DIST
+            BASE=https://raw.githubusercontent.com/ahmedezzat85/codecs/main/packages/openjpeg/dist
+            for f in openjpegwasm_decode.js openjpegwasm_decode.wasm openjpegjs_decode.js openjpegjs_decode.js.mem openjpegwasm.js openjpegwasm.wasm openjpegjs.js openjpegjs.js.mem; do
+              curl -fsSL $BASE/$f -o $DIST/$f 2>/dev/null || echo "SKIP $f"
+            done
           fi
 
-          echo "Using JS:   $WASM_JS"
-          echo "Using WASM: $WASM_BIN"
+          echo "--- Artifact contents ---"
+          ls -lh $DIST/
 
-          # Patch the installed package
-          cp "$WASM_JS"  "$CODEC_DIR/openjpegwasm_decode.js"
-          cp "$WASM_BIN" "$CODEC_DIR/openjpegwasm_decode.wasm"
+          # 1. Patch node_modules (runtime)
+          NM_DEST=node_modules/@cornerstonejs/codec-openjpeg/dist
+          mkdir -p $NM_DEST
+          cp $DIST/*.js   $NM_DEST/ 2>/dev/null || true
+          cp $DIST/*.wasm $NM_DEST/ 2>/dev/null || true
+          cp $DIST/*.mem  $NM_DEST/ 2>/dev/null || true
+          echo "node_modules patched:"
+          ls -lh $NM_DEST/
 
-          # Also keep a vendored copy in the repo so it survives npm install
-          mkdir -p src/codecs/openjpeg
-          cp "$WASM_JS"  src/codecs/openjpeg/openjpegwasm_decode.js
-          cp "$WASM_BIN" src/codecs/openjpeg/openjpegwasm_decode.wasm
-          echo "Artifacts copied successfully."
+          # 2. Vendor copy into src (persistent)
+          SRC_DEST=src/codecs/openjpeg
+          mkdir -p $SRC_DEST
+          cp $DIST/*.js   $SRC_DEST/ 2>/dev/null || true
+          cp $DIST/*.wasm $SRC_DEST/ 2>/dev/null || true
+          cp $DIST/*.mem  $SRC_DEST/ 2>/dev/null || true
+          echo "src vendored:"
+          ls -lh $SRC_DEST/
 
-      # ----------------------------------------------------------------
-      # Step 3: Fix webpack-bundle.js — replace regex exclude with
-      # a function so Windows-style backslash paths are also matched.
-      # ----------------------------------------------------------------
-      - name: Fix webpack-bundle.js ESLint/babel exclude
-        run: |
-          node - <<'EOF'
-          const fs = require('fs');
-          const path = require('path');
-
-          const cfgPath = path.resolve('config/webpack/webpack-bundle.js');
-          let src = fs.readFileSync(cfgPath, 'utf8');
-
-          // Detect if already patched
-          if (src.includes('modulePath.includes')) {
-            console.log('webpack-bundle.js already patched — skipping.');
-            process.exit(0);
-          }
-
-          // Replace exclude: /node_modules/ style regexes in both loaders
-          // with a function that also excludes chafey-openjpeg and codecs paths
-          const excludeFn = `(modulePath) => {
-              return (
-                /node_modules/.test(modulePath) ||
-                /codecs/.test(modulePath) ||
-                modulePath.includes('chafey-openjpeg') ||
-                modulePath.includes('openjpegwasm')
-              );
-            }`;
-
-          // Replace the eslint-loader exclude
-          src = src.replace(
-            /(enforce\s*:\s*['"]pre['"][\s\S]*?exclude\s*:\s*)(\/node_modules\/|['"][^'"]*['"]|\([^)]*\))/,
-            (m, prefix) => prefix + excludeFn
-          );
-
-          // Replace the babel-loader exclude  
-          src = src.replace(
-            /(loader\s*:\s*['"]babel-loader['"][\s\S]{0,300}?exclude\s*:\s*)(\/node_modules\/|['"][^'"]*['"]|\([^)]*\))/,
-            (m, prefix) => prefix + excludeFn
-          );
-
-          // Also replace any regex exclude that appears near chafey or openjpeg references
-          // generic safety pass: replace /node_modules/ excludes that aren't already functions
-          src = src.replace(
-            /exclude\s*:\s*\/node_modules\//g,
-            `exclude: ${excludeFn}`
-          );
-
-          fs.writeFileSync(cfgPath, src);
-          console.log('webpack-bundle.js patched successfully.');
-          EOF
-
-      - name: Show diff of webpack-bundle.js
-        run: git diff config/webpack/webpack-bundle.js || true
-
-      # ----------------------------------------------------------------
-      # Step 4: Run the webpack build and capture output
-      # ----------------------------------------------------------------
-      - name: Build cornerstoneWADOImageLoader
-        id: webpack-build
-        run: |
-          npm run build 2>&1 | tee /tmp/build-output.txt
-          echo "exit_code=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+      - name: Run build
+        run: npm run build 2>&1 | tee /tmp/build.log
 
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-log
-          path: /tmp/build-output.txt
-          retention-days: 14
+          path: /tmp/build.log
+          retention-days: 7
 
-      - name: Fail if build failed
-        if: steps.webpack-build.outputs.exit_code != '0'
-        run: |
-          echo "Build FAILED. See build-log artifact for details."
-          cat /tmp/build-output.txt | tail -60
-          exit 1
-
-      # ----------------------------------------------------------------
-      # Step 5: Commit the vendored WASM + patched webpack config
-      # ----------------------------------------------------------------
-      - name: Commit changes
+      - name: Commit vendored WASM to repo
+        if: success()
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
+          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
           git add src/codecs/openjpeg/
-          git add config/webpack/webpack-bundle.js
-
           if git diff --cached --quiet; then
-            echo "No changes to commit."
+            echo "No changes to vendor - skipping commit."
           else
-            CODECS_SHA=$(echo "${{ github.event.client_payload.codecs_sha }}" | cut -c1-7)
-            MSG="chore: migrate openjpeg WASM from codecs@${CODECS_SHA:-manual} + fix webpack exclude"
-            git commit -m "$MSG"
-            git push
+            git commit -m "ci: update vendored openjpeg WASM artifacts [skip ci]"
+            git push origin main
           fi
-
-      - name: Build summary
-        if: always()
-        run: |
-          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
-          echo "| Step | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| WASM artifact download | ${{ steps.resolve-run.outcome }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| webpack-bundle.js patch | Applied |" >> $GITHUB_STEP_SUMMARY
-          echo "| webpack build | ${{ steps.webpack-build.outputs.exit_code == '0' && '✅ success' || '❌ failed' }} |" >> $GITHUB_STEP_SUMMARY

@@ -9,6 +9,21 @@ const TerserPlugin = require('terser-webpack-plugin');
 const BundleAnalyzerPlugin =
   require('webpack-bundle-analyzer').BundleAnalyzerPlugin;
 
+// Exclude function — handles Windows backslash paths + vendor codec files
+const isExcludedFromLinting = (modulePath) =>
+  /node_modules/.test(modulePath) ||
+  /codecs/.test(modulePath) ||
+  modulePath.includes('chafey-openjpeg') ||
+  modulePath.includes('openjpegwasm') ||
+  modulePath.includes('openjpegjs');
+
+const isExcludedFromBabel = (modulePath) =>
+  /node_modules/.test(modulePath) ||
+  /codecs/.test(modulePath) ||
+  modulePath.includes('chafey-openjpeg') ||
+  modulePath.includes('openjpegwasm') ||
+  modulePath.includes('openjpegjs');
+
 // The big difference between this and the dynamic-import version is that
 // the dynamic import version does not bundle the WASM modules into the WebWorker file
 module.exports = {
@@ -50,7 +65,7 @@ module.exports = {
       {
         enforce: 'pre',
         test: /\.js$/,
-        exclude: /(node_modules)|(codecs)/,
+        exclude: isExcludedFromLinting,
         loader: 'eslint-loader',
         options: {
           failOnError: false,
@@ -74,7 +89,7 @@ module.exports = {
       },
       {
         test: /\.js$/,
-        exclude: [/(node_modules)/, /(codecs)/],
+        exclude: isExcludedFromBabel,
         use: {
           loader: 'babel-loader',
         },
